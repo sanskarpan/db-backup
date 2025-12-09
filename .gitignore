@@ -30,3 +30,32 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Build artifacts
+bin/
+dist/
+
+# Configuration files (keep example only)
+config.yaml
+config.yml
+
+# Backup directories
+backups/
+*.sql
+*.sql.gz
+*.dump
+
+# Temporary files
+tmp/
+temp/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+node_modules
