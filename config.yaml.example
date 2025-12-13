@@ -1,0 +1,124 @@
+# Database Backup Utility - Configuration File Example
+# Copy this file to config.yaml and customize as needed
+
+server:
+  host: 0.0.0.0
+  port: 8080
+  mode: development  # development or production
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+
+database:
+  metadata:
+    type: postgres
+    host: localhost
+    port: 5432
+    name: backup_metadata
+    user: backup_user
+    password: changeme
+    max_connections: 25
+    ssl_mode: disable
+
+  redis:
+    host: localhost
+    port: 6379
+    password: ""
+    db: 0
+
+logging:
+  level: info              # debug, info, warn, error
+  format: json             # json, text
+  output: stdout           # stdout, file
+  file:
+    path: /var/log/db-backup/backup.log
+    max_size: 100          # MB
+    max_backups: 5
+    max_age: 30            # days
+    compress: true
+
+backup:
+  default_compression: zstd    # gzip, zstd, lz4, none
+  compression_level: 3         # 1-9
+  encryption:
+    enabled: false
+    algorithm: aes-256-gcm
+    key_file: ""
+  retention:
+    daily: 7
+    weekly: 4
+    monthly: 12
+  temp_directory: /tmp/backups
+  parallel_operations: 4
+
+storage:
+  default_provider: local      # s3, gcs, azure, local
+  providers:
+    s3:
+      enabled: false
+      region: us-east-1
+      bucket: my-backups
+      access_key: ""
+      secret_key: ""
+      endpoint: ""               # For S3-compatible services
+      use_path_style: false
+    gcs:
+      enabled: false
+      project: ""
+      bucket: ""
+      credentials_file: ""
+    azure:
+      enabled: false
+      account_name: ""
+      account_key: ""
+      container: ""
+    local:
+      enabled: true
+      path: ./backups
+
+notifications:
+  slack:
+    enabled: false
+    webhook_url: ""
+    channel: "#backups"
+    notify_on:
+      - success
+      - failure
+      - warning
+  email:
+    enabled: false
+    smtp_host: smtp.gmail.com
+    smtp_port: 587
+    username: ""
+    password: ""
+    from: backups@example.com
+    to:
+      - admin@example.com
+  webhook:
+    enabled: false
+    url: ""
+    method: POST
+    headers: {}
+
+metrics:
+  enabled: true
+  prometheus:
+    port: 9090
+    path: /metrics
+
+tracing:
+  enabled: false
+  jaeger:
+    endpoint: http://localhost:14268/api/traces
+    service_name: db-backup
+
+security:
+  jwt:
+    secret: change-this-secret-in-production
+    expiration: 24h
+  api_keys:
+    enabled: false
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 100
