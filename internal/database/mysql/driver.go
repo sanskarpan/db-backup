@@ -19,8 +19,9 @@ import (
 
 // MySQLDriver implements the database.Driver interface for MySQL
 type MySQLDriver struct {
-	db     *sql.DB
-	config *database.ConnectionConfig
+	db          *sql.DB
+	config      *database.ConnectionConfig
+	pitrManager *PITRManager
 }
 
 func init() {
@@ -63,6 +64,7 @@ func (d *MySQLDriver) Connect(ctx context.Context, config *database.ConnectionCo
 
 	d.db = db
 	d.config = config
+	d.pitrManager = NewPITRManager(d)
 	return nil
 }
 
@@ -133,7 +135,10 @@ func (d *MySQLDriver) Backup(ctx context.Context, opts *database.BackupOptions) 
 	}
 
 	// Read stderr
-	stderrOutput, _ := io.ReadAll(stderrPipe)
+	stderrOutput, readErr := io.ReadAll(stderrPipe)
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read stderr: %w", readErr)
+	}
 
 	// Wait for command to complete
 	if err := cmd.Wait(); err != nil {
@@ -205,6 +210,11 @@ func (d *MySQLDriver) Restore(ctx context.Context, opts *database.RestoreOptions
 		Status:    database.RestoreStatusInProgress,
 	}
 
+	// Check if this is a PITR restore
+	if opts.PointInTime != nil {
+		return d.restoreWithPITR(ctx, opts)
+	}
+
 	// Validate backup file exists
 	if _, err := os.Stat(opts.SourceBackup); os.IsNotExist(err) {
 		result.Status = database.RestoreStatusFailed
@@ -249,7 +259,10 @@ func (d *MySQLDriver) Restore(ctx context.Context, opts *database.RestoreOptions
 	cmd.Stdin = backupFile
 
 	// Capture stderr
-	stderrPipe, _ := cmd.StderrPipe()
+	stderrPipe, pipeErr := cmd.StderrPipe()
+	if pipeErr != nil {
+		return nil, fmt.Errorf("failed to create stderr pipe: %w", pipeErr)
+	}
 
 	// Run command
 	if err := cmd.Start(); err != nil {
@@ -258,12 +271,53 @@ func (d *MySQLDriver) Restore(ctx context.Context, opts *database.RestoreOptions
 		return result, pkgErrors.ErrDatabaseRestore(err)
 	}
 
-	stderrOutput, _ := io.ReadAll(stderrPipe)
+	stderrOutput, readErr := io.ReadAll(stderrPipe)
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read stderr: %w", readErr)
+	}
 
 	if err := cmd.Wait(); err != nil {
 		result.Status = database.RestoreStatusFailed
 		result.Error = err
 		return result, pkgErrors.ErrDatabaseRestore(err).WithMetadata("stderr", string(stderrOutput))
+	}
+
+	result.EndTime = time.Now()
+	result.Duration = result.EndTime.Sub(result.StartTime)
+	result.Status = database.RestoreStatusSuccess
+
+	return result, nil
+}
+
+// restoreWithPITR performs point-in-time recovery
+func (d *MySQLDriver) restoreWithPITR(ctx context.Context, opts *database.RestoreOptions) (*database.RestoreResult, error) {
+	result := &database.RestoreResult{
+		StartTime: time.Now(),
+		Status:    database.RestoreStatusInProgress,
+	}
+
+	// Extract binary log directory from metadata
+	binlogDir, ok := opts.Metadata["binlog_dir"]
+	if !ok || binlogDir == "" {
+		result.Status = database.RestoreStatusFailed
+		result.Error = pkgErrors.ErrValidationFailed("binlog_dir not provided in metadata for PITR")
+		return result, result.Error
+	}
+
+	// Create PITR restore options
+	pitrOpts := &PITRRestoreOptions{
+		Database:         opts.Database,
+		BaseBackupPath:   opts.SourceBackup,
+		BinaryLogDir:     binlogDir,
+		TargetTime:       *opts.PointInTime,
+		SkipVerification: opts.SkipValidation,
+	}
+
+	// Perform PITR restore
+	if err := d.pitrManager.RestoreToPointInTime(ctx, pitrOpts); err != nil {
+		result.Status = database.RestoreStatusFailed
+		result.Error = err
+		return result, err
 	}
 
 	result.EndTime = time.Now()
