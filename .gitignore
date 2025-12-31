@@ -48,6 +48,8 @@ backups/
 # Temporary files
 tmp/
 temp/
+cleanup_backup_*/
+*.sh.bak
 
 # Database files
 *.db
@@ -59,3 +61,4 @@ temp/
 logs/
 
 node_modules
+.next/
