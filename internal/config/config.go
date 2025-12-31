@@ -78,9 +78,31 @@ type BackupConfig struct {
 
 // EncryptionConfig holds encryption configuration
 type EncryptionConfig struct {
-	Enabled   bool   `mapstructure:"enabled"`
-	Algorithm string `mapstructure:"algorithm"`
-	KeyFile   string `mapstructure:"key_file"`
+	Enabled      bool        `mapstructure:"enabled"`
+	Algorithm    string      `mapstructure:"algorithm"`
+	KeyFile      string      `mapstructure:"key_file"`
+	KeyStore     string      `mapstructure:"key_store"` // "file", "vault"
+	Vault        VaultConfig `mapstructure:"vault"`
+	KeyRotation  KeyRotationConfig `mapstructure:"key_rotation"`
+}
+
+// VaultConfig holds HashiCorp Vault configuration
+type VaultConfig struct {
+	Enabled    bool   `mapstructure:"enabled"`
+	Address    string `mapstructure:"address"`
+	Token      string `mapstructure:"token"`
+	MountPath  string `mapstructure:"mount_path"`
+	KeyPrefix  string `mapstructure:"key_prefix"`
+	Namespace  string `mapstructure:"namespace"`
+	CurrentKey string `mapstructure:"current_key"`
+}
+
+// KeyRotationConfig holds key rotation configuration
+type KeyRotationConfig struct {
+	Enabled          bool   `mapstructure:"enabled"`
+	RotationInterval string `mapstructure:"rotation_interval"` // e.g., "720h" (30 days)
+	AutoRotate       bool   `mapstructure:"auto_rotate"`
+	ReencryptOnRotate bool  `mapstructure:"reencrypt_on_rotate"`
 }
 
 // RetentionConfig holds backup retention configuration
@@ -185,19 +207,44 @@ type PrometheusConfig struct {
 
 // TracingConfig holds tracing configuration
 type TracingConfig struct {
-	Enabled bool         `mapstructure:"enabled"`
-	Jaeger  JaegerConfig `mapstructure:"jaeger"`
+	Enabled      bool           `mapstructure:"enabled"`
+	Provider     string         `mapstructure:"provider"` // "jaeger", "zipkin", "otlp"
+	ServiceName  string         `mapstructure:"service_name"`
+	Environment  string         `mapstructure:"environment"`
+	Sampling     SamplingConfig `mapstructure:"sampling"`
+	Jaeger       JaegerConfig   `mapstructure:"jaeger"`
+	OTLP         OTLPConfig     `mapstructure:"otlp"`
+	BatchTimeout time.Duration  `mapstructure:"batch_timeout"`
+	MaxQueueSize int            `mapstructure:"max_queue_size"`
+}
+
+// SamplingConfig holds trace sampling configuration
+type SamplingConfig struct {
+	Type  string  `mapstructure:"type"` // "always", "never", "probability", "rate_limiting"
+	Rate  float64 `mapstructure:"rate"` // For probability sampler (0.0 to 1.0)
+	Limit int     `mapstructure:"limit"` // For rate limiting sampler (traces per second)
 }
 
 // JaegerConfig holds Jaeger configuration
 type JaegerConfig struct {
 	Endpoint    string `mapstructure:"endpoint"`
+	AgentHost   string `mapstructure:"agent_host"`
+	AgentPort   int    `mapstructure:"agent_port"`
 	ServiceName string `mapstructure:"service_name"`
+	Tags        map[string]string `mapstructure:"tags"`
+}
+
+// OTLPConfig holds OpenTelemetry Protocol configuration
+type OTLPConfig struct {
+	Endpoint string            `mapstructure:"endpoint"`
+	Insecure bool              `mapstructure:"insecure"`
+	Headers  map[string]string `mapstructure:"headers"`
 }
 
 // SecurityConfig holds security configuration
 type SecurityConfig struct {
 	JWT          JWTConfig          `mapstructure:"jwt"`
+	OAuth2       OAuth2Config       `mapstructure:"oauth2"`
 	APIKeys      APIKeysConfig      `mapstructure:"api_keys"`
 	RateLimiting RateLimitingConfig `mapstructure:"rate_limiting"`
 }
@@ -206,6 +253,25 @@ type SecurityConfig struct {
 type JWTConfig struct {
 	Secret     string        `mapstructure:"secret"`
 	Expiration time.Duration `mapstructure:"expiration"`
+}
+
+// OAuth2Config holds OAuth2 configuration
+type OAuth2Config struct {
+	Enabled      bool                       `mapstructure:"enabled"`
+	Providers    map[string]OAuth2Provider  `mapstructure:"providers"`
+	RedirectURL  string                     `mapstructure:"redirect_url"`
+	StateTimeout time.Duration              `mapstructure:"state_timeout"`
+}
+
+// OAuth2Provider holds individual OAuth2 provider configuration
+type OAuth2Provider struct {
+	Enabled      bool     `mapstructure:"enabled"`
+	ClientID     string   `mapstructure:"client_id"`
+	ClientSecret string   `mapstructure:"client_secret"`
+	Scopes       []string `mapstructure:"scopes"`
+	AuthURL      string   `mapstructure:"auth_url"`
+	TokenURL     string   `mapstructure:"token_url"`
+	UserInfoURL  string   `mapstructure:"user_info_url"`
 }
 
 // APIKeysConfig holds API keys configuration
@@ -303,6 +369,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.jwt.expiration", "24h")
 	// NOTE: JWT secret MUST be set via environment variable DBBACKUP_SECURITY_JWT_SECRET
 	// or in config file for security reasons. No default is provided.
+	v.SetDefault("security.oauth2.enabled", false)
+	v.SetDefault("security.oauth2.state_timeout", "10m")
 	v.SetDefault("security.api_keys.enabled", false)
 	v.SetDefault("security.rate_limiting.enabled", true)
 	v.SetDefault("security.rate_limiting.requests_per_minute", 100)
@@ -378,5 +446,51 @@ func validate(config *Config) error {
 		}
 	}
 
+	return nil
+}
+// ValidateConfig validates critical configuration parameters
+func ValidateConfig(cfg *Config) error {
+	var errors []string
+	
+	// Validate JWT secret
+	jwtSecret := os.Getenv("DBBACKUP_SECURITY_JWT_SECRET")
+	if jwtSecret == "" {
+		errors = append(errors, "JWT secret (DBBACKUP_SECURITY_JWT_SECRET) is not set")
+	} else if len(jwtSecret) < 32 {
+		errors = append(errors, "JWT secret must be at least 32 characters long")
+	}
+	
+	// Validate encryption configuration if enabled
+	if cfg.Backup.Encryption.Enabled {
+		if cfg.Backup.Encryption.KeyFile == "" && cfg.Backup.Encryption.KeyStore != "vault" {
+			errors = append(errors, "Encryption enabled but no key file specified")
+		}
+		
+		if cfg.Backup.Encryption.KeyFile != "" {
+			if _, err := os.Stat(cfg.Backup.Encryption.KeyFile); os.IsNotExist(err) {
+				errors = append(errors, fmt.Sprintf("Encryption key file not found: %s", cfg.Backup.Encryption.KeyFile))
+			}
+		}
+	}
+	
+	// Validate TLS configuration if enabled
+	if cfg.Server.TLS.Enabled {
+		if cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "" {
+			errors = append(errors, "TLS enabled but certificate or key file not specified")
+		}
+		
+		if _, err := os.Stat(cfg.Server.TLS.CertFile); os.IsNotExist(err) {
+			errors = append(errors, fmt.Sprintf("TLS certificate file not found: %s", cfg.Server.TLS.CertFile))
+		}
+		
+		if _, err := os.Stat(cfg.Server.TLS.KeyFile); os.IsNotExist(err) {
+			errors = append(errors, fmt.Sprintf("TLS key file not found: %s", cfg.Server.TLS.KeyFile))
+		}
+	}
+	
+	if len(errors) > 0 {
+		return fmt.Errorf("configuration validation failed:\\n  - %s", strings.Join(errors, "\\n  - "))
+	}
+	
 	return nil
 }
