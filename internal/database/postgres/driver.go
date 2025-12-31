@@ -20,8 +20,9 @@ import (
 
 // PostgreSQLDriver implements the database.Driver interface for PostgreSQL
 type PostgreSQLDriver struct {
-	db     *sql.DB
-	config *database.ConnectionConfig
+	db          *sql.DB
+	config      *database.ConnectionConfig
+	pitrManager *PITRManager
 }
 
 func init() {
@@ -64,6 +65,7 @@ func (d *PostgreSQLDriver) Connect(ctx context.Context, config *database.Connect
 
 	d.db = db
 	d.config = config
+	d.pitrManager = NewPITRManager(d)
 	return nil
 }
 
@@ -134,7 +136,10 @@ func (d *PostgreSQLDriver) Backup(ctx context.Context, opts *database.BackupOpti
 	}
 
 	// Read stderr
-	stderrOutput, _ := io.ReadAll(stderrPipe)
+	stderrOutput, readErr := io.ReadAll(stderrPipe)
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read stderr: %w", readErr)
+	}
 
 	// Wait for command to complete
 	if err := cmd.Wait(); err != nil {
@@ -203,6 +208,11 @@ func (d *PostgreSQLDriver) Restore(ctx context.Context, opts *database.RestoreOp
 		Status:    database.RestoreStatusInProgress,
 	}
 
+	// Check if this is a PITR restore
+	if opts.PointInTime != nil {
+		return d.restoreWithPITR(ctx, opts)
+	}
+
 	// Validate backup file exists
 	if _, err := os.Stat(opts.SourceBackup); os.IsNotExist(err) {
 		result.Status = database.RestoreStatusFailed
@@ -255,12 +265,61 @@ func (d *PostgreSQLDriver) Restore(ctx context.Context, opts *database.RestoreOp
 		return result, pkgErrors.ErrDatabaseRestore(err)
 	}
 
-	stderrOutput, _ := io.ReadAll(stderrPipe)
+	stderrOutput, readErr := io.ReadAll(stderrPipe)
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read stderr: %w", readErr)
+	}
 
 	if err := cmd.Wait(); err != nil {
 		result.Status = database.RestoreStatusFailed
 		result.Error = err
 		return result, pkgErrors.ErrDatabaseRestore(err).WithMetadata("stderr", string(stderrOutput))
+	}
+
+	result.EndTime = time.Now()
+	result.Duration = result.EndTime.Sub(result.StartTime)
+	result.Status = database.RestoreStatusSuccess
+
+	return result, nil
+}
+
+// restoreWithPITR performs point-in-time recovery
+func (d *PostgreSQLDriver) restoreWithPITR(ctx context.Context, opts *database.RestoreOptions) (*database.RestoreResult, error) {
+	result := &database.RestoreResult{
+		StartTime: time.Now(),
+		Status:    database.RestoreStatusInProgress,
+	}
+
+	// Extract WAL directory and data directory from metadata
+	walDir, ok := opts.Metadata["wal_dir"]
+	if !ok || walDir == "" {
+		result.Status = database.RestoreStatusFailed
+		result.Error = pkgErrors.ErrValidationFailed("wal_dir not provided in metadata for PITR")
+		return result, result.Error
+	}
+
+	dataDir, ok := opts.Metadata["data_dir"]
+	if !ok || dataDir == "" {
+		result.Status = database.RestoreStatusFailed
+		result.Error = pkgErrors.ErrValidationFailed("data_dir not provided in metadata for PITR")
+		return result, result.Error
+	}
+
+	// Create PITR restore options
+	pitrOpts := &PITRRestoreOptions{
+		Database:         opts.Database,
+		BaseBackupPath:   opts.SourceBackup,
+		WALDirectory:     walDir,
+		DataDirectory:    dataDir,
+		TargetTime:       *opts.PointInTime,
+		SkipVerification: opts.SkipValidation,
+	}
+
+	// Perform PITR restore
+	if err := d.pitrManager.RestoreToPointInTime(ctx, pitrOpts); err != nil {
+		result.Status = database.RestoreStatusFailed
+		result.Error = err
+		return result, err
 	}
 
 	result.EndTime = time.Now()
