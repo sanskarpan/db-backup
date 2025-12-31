@@ -20,8 +20,9 @@ import (
 
 // MongoDBDriver implements the database.Driver interface for MongoDB
 type MongoDBDriver struct {
-	client *mongo.Client
-	config *database.ConnectionConfig
+	client      *mongo.Client
+	config      *database.ConnectionConfig
+	pitrManager *PITRManager
 }
 
 func init() {
@@ -59,6 +60,7 @@ func (d *MongoDBDriver) Connect(ctx context.Context, config *database.Connection
 
 	d.client = client
 	d.config = config
+	d.pitrManager = NewPITRManager(d)
 	return nil
 }
 
@@ -182,6 +184,11 @@ func (d *MongoDBDriver) Restore(ctx context.Context, opts *database.RestoreOptio
 		Status:    database.RestoreStatusInProgress,
 	}
 
+	// Check if this is a PITR restore
+	if opts.PointInTime != nil {
+		return d.restoreWithPITR(ctx, opts)
+	}
+
 	// Validate backup directory exists
 	if _, err := os.Stat(opts.SourceBackup); os.IsNotExist(err) {
 		result.Status = database.RestoreStatusFailed
@@ -216,6 +223,44 @@ func (d *MongoDBDriver) Restore(ctx context.Context, opts *database.RestoreOptio
 		result.Status = database.RestoreStatusFailed
 		result.Error = err
 		return result, pkgErrors.ErrDatabaseRestore(err).WithMetadata("stderr", string(stderrOutput))
+	}
+
+	result.EndTime = time.Now()
+	result.Duration = result.EndTime.Sub(result.StartTime)
+	result.Status = database.RestoreStatusSuccess
+
+	return result, nil
+}
+
+// restoreWithPITR performs point-in-time recovery
+func (d *MongoDBDriver) restoreWithPITR(ctx context.Context, opts *database.RestoreOptions) (*database.RestoreResult, error) {
+	result := &database.RestoreResult{
+		StartTime: time.Now(),
+		Status:    database.RestoreStatusInProgress,
+	}
+
+	// Extract oplog directory from metadata
+	oplogDir, ok := opts.Metadata["oplog_dir"]
+	if !ok || oplogDir == "" {
+		result.Status = database.RestoreStatusFailed
+		result.Error = pkgErrors.ErrValidationFailed("oplog_dir not provided in metadata for PITR")
+		return result, result.Error
+	}
+
+	// Create PITR restore options
+	pitrOpts := &PITRRestoreOptions{
+		Database:         opts.Database,
+		BaseBackupPath:   opts.SourceBackup,
+		OplogDir:         oplogDir,
+		TargetTime:       *opts.PointInTime,
+		SkipVerification: opts.SkipValidation,
+	}
+
+	// Perform PITR restore
+	if err := d.pitrManager.RestoreToPointInTime(ctx, pitrOpts); err != nil {
+		result.Status = database.RestoreStatusFailed
+		result.Error = err
+		return result, err
 	}
 
 	result.EndTime = time.Now()
