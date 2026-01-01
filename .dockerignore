@@ -1,0 +1,88 @@
+# Git
+.git
+.gitignore
+.gitattributes
+.github
+
+# CI/CD
+.gitlab-ci.yml
+.gitlab
+.circleci
+
+# Documentation
+*.md
+!README.md
+docs/
+CHANGELOG.md
+CONTRIBUTING.md
+LICENSE
+
+# Tests
+*_test.go
+test/
+tests/
+coverage/
+*.out
+*.test
+
+# Build artifacts
+bin/
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+vendor/
+*.sum
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/dist/
+frontend/.turbo/
+frontend/coverage/
+frontend/.cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Deployment
+deployments/
+k8s/
+helm/
+docker-compose*.yml
+.env
+.env.*
+!.env.example
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log
+*.pid
+*.seed
+*.pid.lock
+
+# Security
+*.pem
+*.key
+*.crt
+secrets/
+.secrets/
+
+# Misc
+.editorconfig
+.prettierrc
+.eslintrc*
+tsconfig.json
