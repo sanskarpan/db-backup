@@ -1,6 +1,6 @@
 module github.com/sanskarpan/db-backup
 
-go 1.24.0
+go 1.21
 
 require (
 	cloud.google.com/go/storage v1.36.0
