@@ -39,6 +39,14 @@ dist/
 config.yaml
 config.yml
 
+# Kubernetes secrets (keep only .example files)
+k8s/secret.yaml
+k8s/secrets.yaml
+k8s/*-secret.yaml
+!k8s/*.example
+helm/*/values-prod.yaml
+helm/*/values-production.yaml
+
 # Backup directories
 backups/
 *.sql
