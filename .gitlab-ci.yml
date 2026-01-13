@@ -1,0 +1,378 @@
+variables:
+  GO_VERSION: "1.21"
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_REGISTRY: $CI_REGISTRY
+  IMAGE_NAME: $CI_REGISTRY_IMAGE
+  # Kubernetes
+  KUBECONFIG: /etc/deploy/config
+  HELM_VERSION: "3.13.0"
+
+stages:
+  - lint
+  - test
+  - security
+  - build
+  - deploy
+  - release
+
+# Templates
+.go_template: &go_template
+  image: golang:${GO_VERSION}
+  before_script:
+    - go version
+    - go mod download
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - .go/pkg/mod/
+
+.docker_template: &docker_template
+  image: docker:24
+  services:
+    - docker:24-dind
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+
+# Lint Stage
+golangci-lint:
+  <<: *go_template
+  stage: lint
+  script:
+    - curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin
+    - golangci-lint run --timeout=10m --config=.golangci.yml
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"'
+
+code-format:
+  <<: *go_template
+  stage: lint
+  script:
+    - test -z "$(gofmt -l .)"
+    - go install golang.org/x/tools/cmd/goimports@latest
+    - test -z "$(goimports -l .)"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+go-mod-tidy:
+  <<: *go_template
+  stage: lint
+  script:
+    - go mod tidy
+    - git diff --exit-code go.mod go.sum
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# Test Stage
+unit-tests:
+  <<: *go_template
+  stage: test
+  script:
+    - go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+    - go tool cover -func=coverage.out
+  coverage: '/total:\s+\(statements\)\s+(\d+.\d+)%/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.out
+    paths:
+      - coverage.out
+    expire_in: 1 week
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+integration-tests:
+  <<: *go_template
+  stage: test
+  services:
+    - name: postgres:15
+      alias: postgres
+    - name: mysql:8.0
+      alias: mysql
+    - name: mongo:6.0
+      alias: mongodb
+    - name: redis:7
+      alias: redis
+  variables:
+    POSTGRES_DB: testdb
+    POSTGRES_USER: test
+    POSTGRES_PASSWORD: test
+    MYSQL_ROOT_PASSWORD: root
+    MYSQL_DATABASE: testdb
+    MYSQL_USER: test
+    MYSQL_PASSWORD: test
+    MONGO_INITDB_ROOT_USERNAME: test
+    MONGO_INITDB_ROOT_PASSWORD: test
+    POSTGRES_HOST: postgres
+    MYSQL_HOST: mysql
+    MONGODB_URI: mongodb://test:test@mongodb:27017/?authSource=admin
+    REDIS_HOST: redis
+  script:
+    - go test -v -tags=integration -timeout=20m ./tests/integration/...
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+benchmark-tests:
+  <<: *go_template
+  stage: test
+  script:
+    - go test -bench=. -benchmem -run=^$ ./... | tee benchmark.txt
+  artifacts:
+    paths:
+      - benchmark.txt
+    expire_in: 1 week
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Security Stage
+gosec:
+  <<: *go_template
+  stage: security
+  script:
+    - go install github.com/securego/gosec/v2/cmd/gosec@latest
+    - gosec -fmt json -out gosec-report.json ./...
+  artifacts:
+    reports:
+      sast: gosec-report.json
+    paths:
+      - gosec-report.json
+    expire_in: 1 week
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+trivy-fs:
+  image: aquasec/trivy:latest
+  stage: security
+  script:
+    - trivy fs --exit-code 1 --severity CRITICAL,HIGH --format json --output trivy-fs-report.json .
+  artifacts:
+    reports:
+      container_scanning: trivy-fs-report.json
+    paths:
+      - trivy-fs-report.json
+    expire_in: 1 week
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+
+dependency-scanning:
+  <<: *go_template
+  stage: security
+  script:
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+    - govulncheck ./...
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+secret-detection:
+  image: alpine:latest
+  stage: security
+  before_script:
+    - apk add --no-cache git
+  script:
+    - |
+      wget -O gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.18.0/gitleaks_8.18.0_linux_x64.tar.gz
+      tar -xzf gitleaks.tar.gz
+      ./gitleaks detect --source . --verbose --no-git
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+license-check:
+  <<: *go_template
+  stage: security
+  script:
+    - go install github.com/google/go-licenses@latest
+    - go-licenses check ./... --allowed_licenses=MIT,Apache-2.0,BSD-3-Clause,BSD-2-Clause,ISC
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Build Stage
+build-binaries:
+  <<: *go_template
+  stage: build
+  parallel:
+    matrix:
+      - GOOS: [linux, darwin, windows]
+        GOARCH: [amd64, arm64]
+        exclude:
+          - GOOS: windows
+            GOARCH: arm64
+  script:
+    - |
+      VERSION=${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}
+      BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+      GIT_COMMIT=${CI_COMMIT_SHORT_SHA}
+
+      mkdir -p dist
+      BINARY_NAME=db-backup
+      if [ "$GOOS" = "windows" ]; then
+        BINARY_NAME="${BINARY_NAME}.exe"
+      fi
+
+      CGO_ENABLED=0 go build \
+        -ldflags "-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT} -w -s" \
+        -o dist/${BINARY_NAME}-${GOOS}-${GOARCH} \
+        ./cmd/db-backup
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+build-docker:
+  <<: *docker_template
+  stage: build
+  script:
+    - |
+      VERSION=${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}
+
+      docker buildx create --use --name builder || true
+      docker buildx build \
+        --platform linux/amd64,linux/arm64 \
+        --build-arg VERSION=${VERSION} \
+        --build-arg BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S') \
+        --build-arg GIT_COMMIT=${CI_COMMIT_SHORT_SHA} \
+        --tag ${IMAGE_NAME}:${VERSION} \
+        --tag ${IMAGE_NAME}:latest \
+        --push \
+        .
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+trivy-image:
+  image: aquasec/trivy:latest
+  stage: build
+  needs: [build-docker]
+  script:
+    - trivy image --exit-code 1 --severity CRITICAL,HIGH ${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Deploy Stage
+deploy-development:
+  image: alpine/helm:${HELM_VERSION}
+  stage: deploy
+  environment:
+    name: development
+    url: https://api-dev.backup.example.com
+  before_script:
+    - apk add --no-cache curl
+    - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    - install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+    - mkdir -p $(dirname $KUBECONFIG)
+    - echo "${KUBECONFIG_DEVELOPMENT}" | base64 -d > ${KUBECONFIG}
+  script:
+    - |
+      helm upgrade --install db-backup ./helm/db-backup \
+        --namespace db-backup \
+        --create-namespace \
+        --values ./helm/db-backup/values-development.yaml \
+        --set image.tag=${CI_COMMIT_SHORT_SHA} \
+        --set image.repository=${IMAGE_NAME} \
+        --wait \
+        --timeout 10m
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+
+deploy-staging:
+  image: alpine/helm:${HELM_VERSION}
+  stage: deploy
+  environment:
+    name: staging
+    url: https://api-staging.backup.example.com
+  before_script:
+    - apk add --no-cache curl
+    - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    - install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+    - mkdir -p $(dirname $KUBECONFIG)
+    - echo "${KUBECONFIG_STAGING}" | base64 -d > ${KUBECONFIG}
+  script:
+    - |
+      helm upgrade --install db-backup ./helm/db-backup \
+        --namespace db-backup \
+        --create-namespace \
+        --values ./helm/db-backup/values-staging.yaml \
+        --set image.tag=${CI_COMMIT_SHORT_SHA} \
+        --set image.repository=${IMAGE_NAME} \
+        --wait \
+        --timeout 10m
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+
+deploy-production:
+  image: alpine/helm:${HELM_VERSION}
+  stage: deploy
+  environment:
+    name: production
+    url: https://api.backup.example.com
+  before_script:
+    - apk add --no-cache curl
+    - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    - install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+    - mkdir -p $(dirname $KUBECONFIG)
+    - echo "${KUBECONFIG_PRODUCTION}" | base64 -d > ${KUBECONFIG}
+  script:
+    - |
+      helm upgrade --install db-backup ./helm/db-backup \
+        --namespace db-backup \
+        --create-namespace \
+        --values ./helm/db-backup/values-production.yaml \
+        --set image.tag=${CI_COMMIT_TAG} \
+        --set image.repository=${IMAGE_NAME} \
+        --wait \
+        --timeout 10m
+    - kubectl rollout status deployment/db-backup -n db-backup --timeout=5m
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: manual
+
+# Release Stage
+create-release:
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  stage: release
+  script:
+    - echo "Creating release ${CI_COMMIT_TAG}"
+  release:
+    tag_name: '$CI_COMMIT_TAG'
+    description: './CHANGELOG.md'
+    assets:
+      links:
+        - name: 'Docker Image'
+          url: '${IMAGE_NAME}:${CI_COMMIT_TAG}'
+        - name: 'Helm Chart'
+          url: 'https://charts.backup.example.com/db-backup-${CI_COMMIT_TAG}.tgz'
+  rules:
+    - if: '$CI_COMMIT_TAG'
+
+helm-package:
+  image: alpine/helm:${HELM_VERSION}
+  stage: release
+  script:
+    - cd helm
+    - helm package db-backup --version ${CI_COMMIT_TAG#v} --app-version ${CI_COMMIT_TAG}
+    - helm repo index . --url https://charts.backup.example.com
+  artifacts:
+    paths:
+      - helm/*.tgz
+      - helm/index.yaml
+    expire_in: never
+  rules:
+    - if: '$CI_COMMIT_TAG'
