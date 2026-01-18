@@ -291,17 +291,31 @@ func (d *PostgreSQLDriver) restoreWithPITR(ctx context.Context, opts *database.R
 	}
 
 	// Extract WAL directory and data directory from metadata
-	walDir, ok := opts.Metadata["wal_dir"]
-	if !ok || walDir == "" {
+	walDirRaw, ok := opts.Metadata["wal_dir"]
+	if !ok {
 		result.Status = database.RestoreStatusFailed
 		result.Error = pkgErrors.ErrValidationFailed("wal_dir not provided in metadata for PITR")
 		return result, result.Error
 	}
 
-	dataDir, ok := opts.Metadata["data_dir"]
-	if !ok || dataDir == "" {
+	walDir, ok := walDirRaw.(string)
+	if !ok || walDir == "" {
+		result.Status = database.RestoreStatusFailed
+		result.Error = pkgErrors.ErrValidationFailed("wal_dir must be a non-empty string")
+		return result, result.Error
+	}
+
+	dataDirRaw, ok := opts.Metadata["data_dir"]
+	if !ok {
 		result.Status = database.RestoreStatusFailed
 		result.Error = pkgErrors.ErrValidationFailed("data_dir not provided in metadata for PITR")
+		return result, result.Error
+	}
+
+	dataDir, ok := dataDirRaw.(string)
+	if !ok || dataDir == "" {
+		result.Status = database.RestoreStatusFailed
+		result.Error = pkgErrors.ErrValidationFailed("data_dir must be a non-empty string")
 		return result, result.Error
 	}
 
@@ -599,3 +613,21 @@ func (d *PostgreSQLDriver) getTableInfo(ctx context.Context, dbName string) ([]d
 	return tables, nil
 }
 
+// GetDatabaseSize returns the total size of all databases on the PostgreSQL server
+func (d *PostgreSQLDriver) GetDatabaseSize(ctx context.Context) (int64, error) {
+	query := `SELECT SUM(pg_database_size(datname))::bigint as total_size
+			  FROM pg_database
+			  WHERE datistemplate = false`
+
+	var totalSize sql.NullInt64
+	err := d.db.QueryRowContext(ctx, query).Scan(&totalSize)
+	if err != nil {
+		return 0, pkgErrors.ErrOperationFailed("failed to query database size: " + err.Error())
+	}
+
+	if !totalSize.Valid {
+		return 0, nil
+	}
+
+	return totalSize.Int64, nil
+}
