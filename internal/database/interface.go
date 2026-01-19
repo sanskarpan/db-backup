@@ -40,6 +40,7 @@ type Driver interface {
 	GetDatabases(ctx context.Context) ([]string, error)
 	GetTables(ctx context.Context, database string) ([]string, error)
 	GetTableSize(ctx context.Context, database, table string) (int64, error)
+	GetDatabaseSize(ctx context.Context) (int64, error) // Get total database/cluster size
 	GetVersion(ctx context.Context) (string, error)
 
 	// Utility
@@ -73,23 +74,28 @@ type BackupOptions struct {
 	Incremental      bool
 	ConsistentBackup bool
 	OutputPath       string
+	OutputDir        string            // Output directory for backups
+	BackupType       string            // Type of backup (e.g., "rdb", "aof", "snapshot")
+	IncludeSchemas   []string          // Schemas/keyspaces/indices to include
 	Compression      CompressionType
 	Parallel         int
 	ChunkSize        int64
-	Metadata         map[string]string
+	Metadata         map[string]interface{} // Changed to interface{} for flexibility
 }
 
 // RestoreOptions holds restore operation options
 type RestoreOptions struct {
 	Database       string
 	SourceBackup   string
+	BackupPath     string    // Path to backup file/directory
+	SourceDatabase string    // Source database name for PITR
 	Tables         []string
 	ExcludeTables  []string
 	PointInTime    *time.Time
 	SkipValidation bool
 	Parallel       int
 	DropExisting   bool
-	Metadata       map[string]string
+	Metadata       map[string]interface{} // Changed to interface{} for flexibility
 }
 
 // BackupResult contains the result of a backup operation
@@ -99,22 +105,26 @@ type BackupResult struct {
 	EndTime         time.Time
 	Duration        time.Duration
 	Size            int64
+	BackupSize      int64 // Alias for Size for compatibility
+	BackupPath      string // Path to the backup file/directory
 	CompressedSize  int64
 	DatabaseVersion string
 	Tables          []TableInfo
 	Checksum        string
-	Metadata        map[string]string
+	Metadata        map[string]interface{} // Changed to interface{} for flexibility
 	Status          BackupStatus
 	Error           error
 }
 
 // RestoreResult contains the result of a restore operation
 type RestoreResult struct {
+	ID             string
 	StartTime      time.Time
 	EndTime        time.Time
 	Duration       time.Duration
 	RestoredTables []string
 	RowsRestored   int64
+	Metadata       map[string]interface{}
 	Status         RestoreStatus
 	Error          error
 }
@@ -134,6 +144,7 @@ const (
 	BackupStatusPending    BackupStatus = "pending"
 	BackupStatusInProgress BackupStatus = "in_progress"
 	BackupStatusSuccess    BackupStatus = "success"
+	BackupStatusCompleted  BackupStatus = "completed" // Alias for success
 	BackupStatusFailed     BackupStatus = "failed"
 )
 
@@ -144,6 +155,7 @@ const (
 	RestoreStatusPending    RestoreStatus = "pending"
 	RestoreStatusInProgress RestoreStatus = "in_progress"
 	RestoreStatusSuccess    RestoreStatus = "success"
+	RestoreStatusCompleted  RestoreStatus = "completed" // Alias for success
 	RestoreStatusFailed     RestoreStatus = "failed"
 )
 
