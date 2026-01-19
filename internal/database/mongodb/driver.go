@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"github.com/sanskarpan/db-backup/internal/database"
@@ -240,10 +241,17 @@ func (d *MongoDBDriver) restoreWithPITR(ctx context.Context, opts *database.Rest
 	}
 
 	// Extract oplog directory from metadata
-	oplogDir, ok := opts.Metadata["oplog_dir"]
-	if !ok || oplogDir == "" {
+	oplogDirRaw, ok := opts.Metadata["oplog_dir"]
+	if !ok {
 		result.Status = database.RestoreStatusFailed
 		result.Error = pkgErrors.ErrValidationFailed("oplog_dir not provided in metadata for PITR")
+		return result, result.Error
+	}
+
+	oplogDir, ok := oplogDirRaw.(string)
+	if !ok || oplogDir == "" {
+		result.Status = database.RestoreStatusFailed
+		result.Error = pkgErrors.ErrValidationFailed("oplog_dir must be a non-empty string")
 		return result, result.Error
 	}
 
@@ -500,4 +508,21 @@ func dirSize(path string) (int64, error) {
 	})
 
 	return size, err
+}
+
+// GetDatabaseSize returns the total size of all databases on the MongoDB server
+func (d *MongoDBDriver) GetDatabaseSize(ctx context.Context) (int64, error) {
+	result := d.client.Database("admin").RunCommand(ctx, bson.D{
+		{Key: "dbStats", Value: 1},
+	})
+
+	var stats struct {
+		DataSize int64 `bson:"dataSize"`
+	}
+
+	if err := result.Decode(&stats); err != nil {
+		return 0, pkgErrors.ErrOperationFailed("failed to query database size: " + err.Error())
+	}
+
+	return stats.DataSize, nil
 }
