@@ -297,10 +297,17 @@ func (d *MySQLDriver) restoreWithPITR(ctx context.Context, opts *database.Restor
 	}
 
 	// Extract binary log directory from metadata
-	binlogDir, ok := opts.Metadata["binlog_dir"]
-	if !ok || binlogDir == "" {
+	binlogDirRaw, ok := opts.Metadata["binlog_dir"]
+	if !ok {
 		result.Status = database.RestoreStatusFailed
 		result.Error = pkgErrors.ErrValidationFailed("binlog_dir not provided in metadata for PITR")
+		return result, result.Error
+	}
+
+	binlogDir, ok := binlogDirRaw.(string)
+	if !ok || binlogDir == "" {
+		result.Status = database.RestoreStatusFailed
+		result.Error = pkgErrors.ErrValidationFailed("binlog_dir must be a non-empty string")
 		return result, result.Error
 	}
 
@@ -539,4 +546,22 @@ func (d *MySQLDriver) getTableInfo(ctx context.Context, dbName string) ([]databa
 	}
 
 	return tables, nil
+}
+
+// GetDatabaseSize returns the total size of all databases on the MySQL server
+func (d *MySQLDriver) GetDatabaseSize(ctx context.Context) (int64, error) {
+	query := `SELECT SUM(data_length + index_length) as total_size
+			  FROM information_schema.TABLES`
+
+	var totalSize sql.NullInt64
+	err := d.db.QueryRowContext(ctx, query).Scan(&totalSize)
+	if err != nil {
+		return 0, pkgErrors.ErrOperationFailed("failed to query database size: " + err.Error())
+	}
+
+	if !totalSize.Valid {
+		return 0, nil
+	}
+
+	return totalSize.Int64, nil
 }
