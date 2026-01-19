@@ -8,6 +8,8 @@ import (
 	"runtime"
 
 	"github.com/spf13/cobra"
+	"github.com/sanskarpan/db-backup/internal/repository"
+	"github.com/sanskarpan/db-backup/internal/models"
 )
 
 // completionCmd represents the completion command
@@ -322,33 +324,242 @@ func init() {
 
 // Helper functions to get dynamic data
 func getDatabases(ctx context.Context) ([]string, error) {
-	// TODO: Implement actual database listing
-	// For now, return empty list
-	return []string{}, nil
+	// Get repository instance
+	repo, err := getRepository()
+	if err != nil {
+		return []string{}, err
+	}
+
+	// List all backups
+	backups, err := repo.List(ctx, nil)
+	if err != nil {
+		return []string{}, err
+	}
+
+	// Extract unique database names
+	databaseMap := make(map[string]bool)
+	for _, backup := range backups {
+		if backup.Database != "" {
+			databaseMap[backup.Database] = true
+		}
+	}
+
+	// Convert to slice
+	databases := make([]string, 0, len(databaseMap))
+	for db := range databaseMap {
+		databases = append(databases, db)
+	}
+
+	return databases, nil
 }
 
 func getBackups(ctx context.Context, database string) ([]string, error) {
-	// TODO: Implement actual backup listing
-	// For now, return empty list
-	return []string{}, nil
+	// Get repository instance
+	repo, err := getRepository()
+	if err != nil {
+		return []string{}, err
+	}
+
+	// Build filter
+	filter := &repository.ListFilter{}
+	if database != "" {
+		filter.Database = database
+	}
+
+	// List backups
+	backups, err := repo.List(ctx, filter)
+	if err != nil {
+		return []string{}, err
+	}
+
+	// Extract backup IDs
+	backupIDs := make([]string, 0, len(backups))
+	for _, backup := range backups {
+		backupIDs = append(backupIDs, backup.ID)
+	}
+
+	return backupIDs, nil
 }
 
 func getSchedules(ctx context.Context) ([]string, error) {
-	// TODO: Implement actual schedule listing
-	return []string{}, nil
+	// Get repository instance
+	repo, err := getRepository()
+	if err != nil {
+		return []string{}, err
+	}
+
+	// List all backups with schedule information
+	backups, err := repo.List(ctx, nil)
+	if err != nil {
+		return []string{}, err
+	}
+
+	// Extract unique schedule names from tags/metadata
+	scheduleMap := make(map[string]bool)
+	for _, backup := range backups {
+		// Check if backup has schedule tag
+		if backup.Tags != nil {
+			if schedule, ok := backup.Tags["schedule"]; ok && schedule != "" {
+				scheduleMap[schedule] = true
+			}
+		}
+		// Also check metadata field if it exists
+		if backup.Metadata != nil {
+			if schedule, ok := backup.Metadata["schedule"]; ok {
+				if schedStr, ok := schedule.(string); ok && schedStr != "" {
+					scheduleMap[schedStr] = true
+				}
+			}
+		}
+	}
+
+	// Convert to slice
+	schedules := make([]string, 0, len(scheduleMap))
+	for schedule := range scheduleMap {
+		schedules = append(schedules, schedule)
+	}
+
+	return schedules, nil
 }
 
 func getRetentionPolicies(ctx context.Context) ([]string, error) {
-	// TODO: Implement actual retention policy listing
-	return []string{}, nil
+	// Get repository instance
+	repo, err := getRepository()
+	if err != nil {
+		return []string{}, err
+	}
+
+	// List all backups with retention policy information
+	backups, err := repo.List(ctx, nil)
+	if err != nil {
+		return []string{}, err
+	}
+
+	// Extract unique retention policy names from tags/metadata
+	policyMap := make(map[string]bool)
+	for _, backup := range backups {
+		// Check if backup has retention policy tag
+		if backup.Tags != nil {
+			if policy, ok := backup.Tags["retention_policy"]; ok && policy != "" {
+				policyMap[policy] = true
+			}
+		}
+		// Also check metadata field if it exists
+		if backup.Metadata != nil {
+			if policy, ok := backup.Metadata["retention_policy"]; ok {
+				if policyStr, ok := policy.(string); ok && policyStr != "" {
+					policyMap[policyStr] = true
+				}
+			}
+		}
+	}
+
+	// Convert to slice
+	policies := make([]string, 0, len(policyMap))
+	for policy := range policyMap {
+		policies = append(policies, policy)
+	}
+
+	// Add common retention policies as fallback
+	if len(policies) == 0 {
+		policies = []string{"daily", "weekly", "monthly", "yearly"}
+	}
+
+	return policies, nil
 }
 
 func getAlerts(ctx context.Context) ([]string, error) {
-	// TODO: Implement actual alert listing
-	return []string{}, nil
+	// Get repository instance
+	repo, err := getRepository()
+	if err != nil {
+		return []string{}, err
+	}
+
+	// List all backups with alert information
+	backups, err := repo.List(ctx, nil)
+	if err != nil {
+		return []string{}, err
+	}
+
+	// Extract unique alert names from tags/metadata
+	alertMap := make(map[string]bool)
+	for _, backup := range backups {
+		// Check if backup has alert tag
+		if backup.Tags != nil {
+			if alert, ok := backup.Tags["alert"]; ok && alert != "" {
+				alertMap[alert] = true
+			}
+		}
+		// Also check metadata field if it exists
+		if backup.Metadata != nil {
+			if alert, ok := backup.Metadata["alert"]; ok {
+				if alertStr, ok := alert.(string); ok && alertStr != "" {
+					alertMap[alertStr] = true
+				}
+			}
+		}
+	}
+
+	// Convert to slice
+	alerts := make([]string, 0, len(alertMap))
+	for alert := range alertMap {
+		alerts = append(alerts, alert)
+	}
+
+	// Add common alert types as fallback
+	if len(alerts) == 0 {
+		alerts = []string{"backup_failed", "backup_succeeded", "backup_slow", "storage_full"}
+	}
+
+	return alerts, nil
 }
 
 func getTags(ctx context.Context) ([]string, error) {
-	// TODO: Implement actual tag listing
-	return []string{}, nil
+	// Get repository instance
+	repo, err := getRepository()
+	if err != nil {
+		return []string{}, err
+	}
+
+	// List all backups
+	backups, err := repo.List(ctx, nil)
+	if err != nil {
+		return []string{}, err
+	}
+
+	// Extract all unique tag keys
+	tagMap := make(map[string]bool)
+	for _, backup := range backups {
+		if backup.Tags != nil {
+			for tag := range backup.Tags {
+				tagMap[tag] = true
+			}
+		}
+	}
+
+	// Convert to slice
+	tags := make([]string, 0, len(tagMap))
+	for tag := range tagMap {
+		tags = append(tags, tag)
+	}
+
+	return tags, nil
+}
+
+// getRepository creates a repository instance using configuration
+func getRepository() (*repository.FileRepository, error) {
+	// Try to load configuration
+	cfg, err := LoadConfig()
+	if err != nil {
+		// Fall back to default metadata directory
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get user home directory: %w", err)
+		}
+		metadataDir := filepath.Join(homeDir, ".db-backup", "metadata")
+		return repository.NewFileRepository(metadataDir)
+	}
+
+	// Use configured metadata directory
+	return repository.NewFileRepository(cfg.Backup.MetadataDirectory)
 }
