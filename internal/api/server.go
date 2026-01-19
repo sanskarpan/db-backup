@@ -4,6 +4,7 @@ package api
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/sanskarpan/db-backup/internal/api/middleware"
+	"github.com/sanskarpan/db-backup/internal/auth"
 	"github.com/sanskarpan/db-backup/internal/backup"
 	"github.com/sanskarpan/db-backup/internal/catalog"
 	"github.com/sanskarpan/db-backup/internal/health"
@@ -22,6 +23,9 @@ type Server struct {
 	healthChecker *health.Checker
 	detector      *ransomware.Detector
 	searchEngine  *catalog.SearchEngine
+	jwtService    *auth.TokenService
+	oauth2Service *auth.OAuth2Service
+	oauth2Handler *auth.OAuth2Handler
 	logger        *logger.Logger
 }
 
@@ -45,6 +49,9 @@ func NewServer(
 	healthChecker *health.Checker,
 	detector *ransomware.Detector,
 	searchEngine *catalog.SearchEngine,
+	jwtService *auth.TokenService,
+	oauth2Service *auth.OAuth2Service,
+	oauth2Handler *auth.OAuth2Handler,
 	log *logger.Logger,
 ) *Server {
 	return &Server{
@@ -55,6 +62,9 @@ func NewServer(
 		healthChecker: healthChecker,
 		detector:      detector,
 		searchEngine:  searchEngine,
+		jwtService:    jwtService,
+		oauth2Service: oauth2Service,
+		oauth2Handler: oauth2Handler,
 		logger:        log,
 	}
 }
@@ -77,13 +87,16 @@ func (s *Server) SetupRoutes(router *gin.Engine) {
 	// 4. Request size limits (prevent DoS attacks)
 	router.Use(middleware.DefaultMaxBodySize())
 
-	// 5. CSRF protection (with exemptions for health/metrics endpoints)
+	// 5. CSRF protection (with exemptions for health/metrics/auth endpoints)
 	exemptPaths := []string{
 		"/health",
 		"/api/v1/health",
 		"/api/v1/ready",
 		"/api/v1/version",
 		"/api/v1/metrics",
+		"/api/v1/auth/login",
+		"/api/v1/auth/oauth2/providers",
+		"/api/v1/auth/oauth2/callback",
 	}
 	router.Use(middleware.CSRFProtectionWithExemptions(exemptPaths))
 
@@ -94,6 +107,23 @@ func (s *Server) SetupRoutes(router *gin.Engine) {
 		v1.GET("/health", s.handleHealth)
 		v1.GET("/ready", s.handleReady)
 		v1.GET("/version", s.handleVersion)
+
+		// Authentication endpoints
+		if s.jwtService != nil {
+			auth := v1.Group("/auth")
+			{
+				// JWT login (simple username/password for testing)
+				auth.POST("/login", s.handleLogin)
+
+				// OAuth2 endpoints
+				if s.oauth2Handler != nil {
+					auth.GET("/oauth2/providers", gin.WrapF(s.oauth2Handler.ListProviders))
+					auth.GET("/oauth2/:provider/login", gin.WrapF(s.oauth2Handler.InitiateLogin))
+					auth.GET("/oauth2/callback", gin.WrapF(s.oauth2Handler.HandleCallback))
+					auth.GET("/oauth2/user", gin.WrapF(s.oauth2Handler.GetUserInfo))
+				}
+			}
+		}
 
 		// Backup operations
 		backups := v1.Group("/backups")
@@ -153,6 +183,30 @@ func (s *Server) SetupRoutes(router *gin.Engine) {
 		}
 	}
 
+	// Swagger/OpenAPI documentation
+	if s.config.EnableSwagger {
+		// Swagger UI at /swagger/*
+		router.GET("/swagger/*any", gin.WrapH(SwaggerHandler()))
+
+		// Swagger YAML file
+		router.GET("/swagger.yaml", gin.WrapF(SwaggerFileHandler))
+
+		// OpenAPI JSON endpoint
+		router.GET("/openapi.json", func(c *gin.Context) {
+			c.JSON(501, gin.H{
+				"error": "OpenAPI JSON endpoint not yet implemented. Please use /swagger.yaml",
+			})
+		})
+
+		// Redirect /docs to /swagger/
+		router.GET("/docs", func(c *gin.Context) {
+			c.Redirect(302, "/swagger/index.html")
+		})
+		router.GET("/docs/*any", func(c *gin.Context) {
+			c.Redirect(302, "/swagger/index.html")
+		})
+	}
+
 	// Root endpoint
 	router.GET("/", s.handleRoot)
 }
@@ -172,14 +226,21 @@ type SuccessResponse struct {
 
 // Helper methods
 func (s *Server) respondError(c *gin.Context, code int, err error, message string) {
-	s.logger.Error("API error", err, map[string]interface{}{
-		"message": message,
-		"path":    c.Request.URL.Path,
-		"method":  c.Request.Method,
-	})
+	if err != nil {
+		s.logger.Error("API error", err, map[string]interface{}{
+			"message": message,
+			"path":    c.Request.URL.Path,
+			"method":  c.Request.Method,
+		})
+	}
+
+	errMsg := message
+	if err != nil {
+		errMsg = err.Error()
+	}
 
 	c.JSON(code, ErrorResponse{
-		Error:   err.Error(),
+		Error:   errMsg,
 		Message: message,
 	})
 }
